@@ -5,7 +5,6 @@ import { AggregatorServer } from "@/main/modules/mcp-server-runtime/aggregator-s
 import { MCPHttpServer } from "@/main/modules/mcp-server-runtime/http/mcp-http-server";
 import { ToolCatalogService } from "@/main/modules/tool-catalog/tool-catalog.service";
 import started from "electron-squirrel-startup";
-import { updateElectronApp } from "update-electron-app";
 import { setApplicationMenu } from "@/main/ui/menu";
 import { createTray, updateTrayContextMenu } from "@/main/ui/tray";
 import { importExistingServerConfigurations } from "@/main/modules/mcp-apps-manager/mcp-config-importer";
@@ -13,7 +12,6 @@ import { getPlatformAPIManager } from "@/main/modules/workspace/platform-api-man
 import { getWorkspaceService } from "@/main/modules/workspace/workspace.service";
 import { getSharedConfigManager } from "@/main/infrastructure/shared-config-manager";
 import { setupIpcHandlers } from "./main/infrastructure/ipc";
-import { resolveAutoUpdateConfig } from "./main/modules/system/app-updator";
 import { getIsAutoUpdateInProgress } from "./main/modules/system/system-handler";
 import { initializeEnvironment, isDevelopment } from "@/main/utils/environment";
 import { getCloudSyncService } from "@/main/modules/cloud-sync/cloud-sync.service";
@@ -67,14 +65,6 @@ let trayUpdateTimer: NodeJS.Timeout | null = null;
 
 export const BASE_URL = "https://mcp-router.net/";
 export const API_BASE_URL = `${BASE_URL}api`;
-
-// Configure auto update (guarded to avoid crash on unsigned macOS builds)
-const { enabled: enableAutoUpdate, options: autoUpdateOptions } =
-  resolveAutoUpdateConfig();
-
-if (enableAutoUpdate && autoUpdateOptions) {
-  updateElectronApp(autoUpdateOptions);
-}
 
 // Declare global variables defined by Electron Forge
 declare const MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY: string | undefined;
