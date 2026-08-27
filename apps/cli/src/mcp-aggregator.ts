@@ -12,9 +12,15 @@ import {
   ListPromptsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  namespaceCollidingTools,
   normalizeProxiedToolResult,
   type ServerClient,
 } from "@mcp_router/shared";
+
+type AggregatedToolRoute = {
+  serverId: string;
+  originalName: string;
+};
 
 /**
  * Pure MCP Aggregator that combines capabilities from multiple MCP servers
@@ -22,7 +28,7 @@ import {
 export class MCPAggregator {
   private server: Server;
   private clients: Map<string, ServerClient> = new Map();
-  private toolToServerMap: Map<string, string> = new Map();
+  private toolToServerMap: Map<string, AggregatedToolRoute> = new Map();
   private resourceProtocolMap: Map<string, string> = new Map();
 
   constructor() {
@@ -64,8 +70,8 @@ export class MCPAggregator {
     const serverClient = this.clients.get(id);
     if (serverClient) {
       // Clean up tool mappings for this server
-      for (const [toolName, serverId] of this.toolToServerMap) {
-        if (serverId === id) {
+      for (const [toolName, route] of this.toolToServerMap) {
+        if (route.serverId === id) {
           this.toolToServerMap.delete(toolName);
         }
       }
@@ -139,7 +145,11 @@ export class MCPAggregator {
         try {
           const response = await serverClient.client.listTools();
           if (response && Array.isArray(response.tools)) {
-            return { serverId: serverClient.id, tools: response.tools };
+            return {
+              serverId: serverClient.id,
+              serverName: serverClient.name,
+              tools: response.tools,
+            };
           }
         } catch (error) {
           console.error(
@@ -153,15 +163,47 @@ export class MCPAggregator {
 
     const results = await Promise.all(toolPromises);
 
-    // Process results
+    const collected: Array<{
+      tool: any;
+      serverId: string;
+      serverName: string;
+    }> = [];
+
     for (const result of results) {
-      if (result) {
-        for (const tool of result.tools) {
-          // Map tool to server
-          this.toolToServerMap.set(tool.name, result.serverId);
-          allTools.push(tool);
-        }
+      if (!result) {
+        continue;
       }
+      for (const tool of result.tools) {
+        collected.push({
+          tool,
+          serverId: result.serverId,
+          serverName: result.serverName,
+        });
+      }
+    }
+
+    const namespaced = namespaceCollidingTools(
+      collected.map((item) => ({
+        originalName: item.tool.name,
+        serverName: item.serverName,
+        description: item.tool.description,
+      })),
+    );
+
+    for (let i = 0; i < collected.length; i++) {
+      const item = collected[i];
+      const namespacedTool = namespaced[i];
+      this.toolToServerMap.set(namespacedTool.exposedName, {
+        serverId: item.serverId,
+        originalName: item.tool.name,
+      });
+      allTools.push({
+        ...item.tool,
+        name: namespacedTool.exposedName,
+        ...(namespacedTool.description !== undefined
+          ? { description: namespacedTool.description }
+          : {}),
+      });
     }
 
     return allTools;
@@ -172,13 +214,13 @@ export class MCPAggregator {
    */
   private async callTool(params: any): Promise<any> {
     const { name, arguments: args } = params;
-    const serverId = this.toolToServerMap.get(name);
+    const route = this.toolToServerMap.get(name);
 
-    if (!serverId) {
+    if (!route) {
       throw new McpError(ErrorCode.InvalidRequest, `Tool not found: ${name}`);
     }
 
-    const serverClient = this.clients.get(serverId);
+    const serverClient = this.clients.get(route.serverId);
     if (!serverClient) {
       throw new McpError(
         ErrorCode.InvalidRequest,
@@ -189,7 +231,7 @@ export class MCPAggregator {
     try {
       const result = await serverClient.client.callTool(
         {
-          name,
+          name: route.originalName,
           arguments: args || {},
         },
         undefined,
@@ -198,8 +240,8 @@ export class MCPAggregator {
           resetTimeoutOnProgress: true,
         },
       );
-      return normalizeProxiedToolResult(name, result, {
-        serverId,
+      return normalizeProxiedToolResult(route.originalName, result, {
+        serverId: route.serverId,
         serverName: serverClient.name,
       });
     } catch (error) {

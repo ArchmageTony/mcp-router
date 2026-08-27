@@ -2,6 +2,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   MCPServer,
+  namespaceCollidingTools,
   normalizeProxiedToolResult,
   UNASSIGNED_PROJECT_ID,
 } from "@mcp_router/shared";
@@ -20,12 +21,18 @@ import {
   META_TOOLS,
 } from "@/main/modules/tool-catalog/tool-catalog-handler";
 
+type AggregatedToolRoute = {
+  serverName: string;
+  originalName: string;
+};
+
 /**
  * Handles all request processing for the aggregator server
  */
 export class RequestHandlers extends RequestHandlerBase {
   private originalProtocols: Map<string, string> = new Map();
-  private toolNameToServerMap: Map<string, Map<string, string>> = new Map();
+  private toolNameToServerMap: Map<string, Map<string, AggregatedToolRoute>> =
+    new Map();
   private serverStatusMap: Map<string, boolean>;
   private servers: Map<string, MCPServer>;
   private clients: Map<string, Client>;
@@ -85,7 +92,9 @@ export class RequestHandlers extends RequestHandlerBase {
     return projectId ?? UNASSIGNED_PROJECT_ID;
   }
 
-  private ensureToolMap(projectId: string | null): Map<string, string> {
+  private ensureToolMap(
+    projectId: string | null,
+  ): Map<string, AggregatedToolRoute> {
     const key = this.getProjectKey(projectId);
     let map = this.toolNameToServerMap.get(key);
     if (!map) {
@@ -576,7 +585,11 @@ export class RequestHandlers extends RequestHandlerBase {
     const normalizedProjectId = this.normalizeProjectId(projectId);
     const toolMap = this.ensureToolMap(normalizedProjectId);
     toolMap.clear();
-    const allTools: any[] = [];
+    const collected: Array<{
+      tool: any;
+      serverName: string;
+      originalName: string;
+    }> = [];
 
     for (const [serverId, client] of this.clients.entries()) {
       const server = this.servers.get(serverId);
@@ -616,14 +629,11 @@ export class RequestHandlers extends RequestHandlerBase {
             continue;
           }
 
-          const toolWithSource = {
-            ...tool,
-            name: tool.name,
-            sourceServer: serverName,
-          };
-
-          toolMap.set(tool.name, serverName);
-          allTools.push(toolWithSource);
+          collected.push({
+            tool,
+            serverName,
+            originalName: tool.name,
+          });
         }
       } catch (error: any) {
         console.error(
@@ -633,17 +643,45 @@ export class RequestHandlers extends RequestHandlerBase {
       }
     }
 
+    const namespaced = namespaceCollidingTools(
+      collected.map((item) => ({
+        originalName: item.originalName,
+        serverName: item.serverName,
+        description: item.tool.description,
+      })),
+    );
+
+    const allTools: any[] = [];
+    for (let i = 0; i < collected.length; i++) {
+      const item = collected[i];
+      const namespacedTool = namespaced[i];
+      const toolWithSource = {
+        ...item.tool,
+        name: namespacedTool.exposedName,
+        sourceServer: item.serverName,
+        ...(namespacedTool.description !== undefined
+          ? { description: namespacedTool.description }
+          : {}),
+      };
+
+      toolMap.set(namespacedTool.exposedName, {
+        serverName: item.serverName,
+        originalName: item.originalName,
+      });
+      allTools.push(toolWithSource);
+    }
+
     return allTools;
   }
 
   /**
-   * Get server name for a given tool within the project scope (legacy mode)
+   * Get routing info for a given exposed tool name within the project scope.
    */
-  private async getServerNameForTool(
+  private async getToolRoute(
     toolName: string,
     token?: string,
     projectId?: string | null,
-  ): Promise<string | undefined> {
+  ): Promise<AggregatedToolRoute | undefined> {
     const normalizedProjectId = this.normalizeProjectId(projectId);
     const projectKey = this.getProjectKey(normalizedProjectId);
     let toolMap = this.toolNameToServerMap.get(projectKey);
@@ -665,19 +703,15 @@ export class RequestHandlers extends RequestHandlerBase {
     projectId: string | null,
   ): Promise<any> {
     const token = request.params._meta?.token as string | undefined;
-    const mappedServerName = await this.getServerNameForTool(
-      toolName,
-      token,
-      projectId,
-    );
-    if (!mappedServerName) {
+    const route = await this.getToolRoute(toolName, token, projectId);
+    if (!route) {
       throw new McpError(
         ErrorCode.InvalidRequest,
         `Could not determine server for tool: ${toolName}`,
       );
     }
-    const serverName = mappedServerName;
-    const originalToolName = toolName;
+    const serverName = route.serverName;
+    const originalToolName = route.originalName;
 
     const clientId = this.tokenValidator.validateTokenAndAccess(
       token,
